@@ -16,8 +16,10 @@ from src.platform.marketdata.models import MarketCode
 
 logger = logging.getLogger(__name__)
 
-# 腾讯日K接口(与 kline_collector.TENCENT_KLINE_URL 同源,本地化以解除对其内部符号的依赖)
-_TENCENT_KLINE_URL = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+# 腾讯日K接口(与 marketdata 包 kline vendor 同源;web.ifzq 的 fqkline 可能被风控回
+# 501,故主用 proxy.finance 的 newfqkline,老域名兜底)
+_TENCENT_KLINE_URL = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"
+_TENCENT_KLINE_LEGACY_URL = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
 
 
 def _parse_tencent_kline(text: str, tencent_sym: str) -> list[KlineData]:
@@ -131,20 +133,26 @@ def _fetch_benchmark_series(code: str, days: int) -> tuple[list[str], list[float
     tsym = INDEX_TENCENT.get(
         code, (code if code.startswith(("sh", "sz")) else f"sh{code}", code)
     )[0]
-    text = market_get(
-        _TENCENT_KLINE_URL,
-        host_key="web.ifzq.gtimg.cn",
-        params={"param": f"{tsym},day,,,{int(days)},qfq", "_var": "kline_dayqfq"},
-        min_interval_s=0.15,
-        parse="text",
-        raise_for_status=False,
-        log_label="基准指数",
-        symbol=tsym,
-    )
-    if not text:
-        return [], []
-    bars = _parse_tencent_kline(text, tsym)
-    return [b.date for b in bars], [b.close for b in bars]
+    for url, host_key in (
+        (_TENCENT_KLINE_URL, "proxy.finance.qq.com"),
+        (_TENCENT_KLINE_LEGACY_URL, "web.ifzq.gtimg.cn"),
+    ):
+        text = market_get(
+            url,
+            host_key=host_key,
+            params={"param": f"{tsym},day,,,{int(days)},qfq", "_var": "kline_dayqfq"},
+            min_interval_s=0.15,
+            parse="text",
+            raise_for_status=False,
+            log_label="基准指数",
+            symbol=tsym,
+        )
+        if not text:
+            continue
+        bars = _parse_tencent_kline(text, tsym)
+        if bars:
+            return [b.date for b in bars], [b.close for b in bars]
+    return [], []
 
 
 def _ffill_closes(bars: list[KlineData], dates: list[str]) -> list[float]:

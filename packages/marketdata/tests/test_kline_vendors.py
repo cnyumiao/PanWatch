@@ -11,6 +11,44 @@ def test_tencent_kline_parses(monkeypatch):
     assert out[0].date == "2026-07-01" and out[0].close == 3.0 and out[1].volume == 200.0
 
 
+def test_tencent_kline_accepts_bare_json(monkeypatch):
+    """proxy.finance 的 newfqkline 不带 _var 时回裸 JSON,解析器同样要能读。"""
+    payload = '{"code":0,"data":{"sh600519":{"qfqday":[["2026-07-01","1","3","4","0.5","100"]]}}}'
+    monkeypatch.setattr(kv, "market_get", lambda *a, **k: payload)
+    out = kv.TencentKlineVendor().fetch([Symbol.parse("600519")], {"days": 60})
+    assert len(out) == 1 and out[0].close == 3.0
+
+
+def test_tencent_kline_falls_back_to_legacy_host(monkeypatch):
+    """主源(proxy.finance)失败时回老域名 web.ifzq,而不是直接返回空。"""
+    calls = []
+
+    def fake(url, **k):
+        calls.append(url)
+        if "proxy.finance.qq.com" in url:
+            return None  # 模拟 501/风控
+        return 'k={"data":{"sh600519":{"qfqday":[["2026-07-01","1","3","4","0.5","100"]]}}}'
+
+    monkeypatch.setattr(kv, "market_get", fake)
+    out = kv.TencentKlineVendor().fetch([Symbol.parse("600519")], {"days": 60})
+    assert len(out) == 1
+    assert calls[0] == kv._TENCENT_URL and "proxy.finance.qq.com" in calls[0]
+    assert calls[1] == kv._TENCENT_LEGACY_URL
+
+
+def test_tencent_kline_skips_fallback_when_primary_works(monkeypatch):
+    calls = []
+    js = 'k={"data":{"sh600519":{"qfqday":[["2026-07-01","1","3","4","0.5","100"]]}}}'
+
+    def fake(url, **k):
+        calls.append(url)
+        return js
+
+    monkeypatch.setattr(kv, "market_get", fake)
+    out = kv.TencentKlineVendor().fetch([Symbol.parse("600519")], {"days": 60})
+    assert len(out) == 1 and calls == [kv._TENCENT_URL]
+
+
 def test_eastmoney_kline_parses(monkeypatch):
     payload = {"data": {"klines": ["2026-07-01,1,3,4,0.5,100", "2026-07-02,3,5,6,2,200"]}}
     monkeypatch.setattr(kv, "market_get", lambda *a, **k: payload)

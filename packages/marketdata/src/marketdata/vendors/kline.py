@@ -12,7 +12,11 @@ from marketdata.vendors.base import KlineVendor
 
 logger = logging.getLogger(__name__)
 
-_TENCENT_URL = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+# 腾讯日K主源:web.ifzq 的 fqkline 对部分出口 IP / 风控已开始回 HTTP 501(WAF 页),
+# proxy.finance 的 newfqkline 参数与响应结构完全相同(CN 回 qfqday、HK/US 回 day),
+# 仍正常返回,故作为主源;老域名保留作兜底(风控按 IP 生效,可能只是本机被拦)。
+_TENCENT_URL = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"
+_TENCENT_LEGACY_URL = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
 _EASTMONEY_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 _STOOQ_URL = "https://stooq.com/q/d/l/"
 _YAHOO_CHART_URL = "https://query2.finance.yahoo.com/v8/finance/chart/{sym}"
@@ -25,29 +29,21 @@ def _days(config: dict, default: int = 60) -> int:
         return default
 
 
-# 腾讯 fqkline 对 count 有上限:实测 ≤800 正常返(800→801根),1000-2000 退化到 ~641,
+# 腾讯日K对 count 有上限:实测 ≤800 正常返(800→801根),1000-2000 退化到 ~641,
 # ≥3000 直接返空(0根)。上层 want 常放大到 3000(为长历史/回测),若原样透传腾讯会返 0
 # → 每个标的都白白落到东财补全 → 东财一挂就没数据。故把请求 count 截到 800(取回最多)。
 _TENCENT_MAX_COUNT = 800
 
 
-def fetch_tencent_kline_raw(tsym: str, days: int) -> list[Bar]:
-    """按**原始腾讯符号**取日K(不经 Symbol 转换)。
-
-    供指数等显式符号场景复用(sh000001/hkHSI/usDJI…;指数与个股的符号规则不同,
-    必须显式传入)。个股路径请走 TencentKlineVendor。
-    """
-    days = min(max(int(days or 1), 1), _TENCENT_MAX_COUNT)
-    text = market_get(
-        _TENCENT_URL, host_key="web.ifzq.gtimg.cn", min_interval_s=0.15,
-        params={"param": f"{tsym},day,,,{days},qfq", "_var": "kline_dayqfq"},
-        timeout=10, retries=2, parse="text", log_label="腾讯K线", symbol=tsym,
-    )
-    if not text or "=" not in text:
+def _parse_tencent_kline_text(text: str | None, tsym: str) -> list[Bar]:
+    """解析腾讯 K 线响应(`kline_dayqfq={...}` 或裸 JSON)→ Bar 列表。"""
+    if not text:
         return []
-    js = text.split("=", 1)[1].strip().rstrip(";")
+    body = text.strip()
+    if not body.startswith(("{", "[")) and "=" in body:
+        body = body.split("=", 1)[1].strip().rstrip(";")
     try:
-        data = json.loads(js)
+        data = json.loads(body)
     except Exception:
         return []
     raw = data.get("data", {}) if isinstance(data, dict) else {}
@@ -68,6 +64,29 @@ def fetch_tencent_kline_raw(tsym: str, days: int) -> list[Bar]:
             except Exception:
                 continue
     return out
+
+
+def _tencent_kline_request(url: str, host_key: str, tsym: str, days: int) -> list[Bar]:
+    text = market_get(
+        url, host_key=host_key, min_interval_s=0.15,
+        params={"param": f"{tsym},day,,,{days},qfq", "_var": "kline_dayqfq"},
+        timeout=10, retries=2, parse="text", log_label="腾讯K线", symbol=tsym,
+    )
+    return _parse_tencent_kline_text(text, tsym)
+
+
+def fetch_tencent_kline_raw(tsym: str, days: int) -> list[Bar]:
+    """按**原始腾讯符号**取日K(不经 Symbol 转换)。
+
+    供指数等显式符号场景复用(sh000001/hkHSI/usDJI…;指数与个股的符号规则不同,
+    必须显式传入)。个股路径请走 TencentKlineVendor。
+    """
+    days = min(max(int(days or 1), 1), _TENCENT_MAX_COUNT)
+    bars = _tencent_kline_request(_TENCENT_URL, "proxy.finance.qq.com", tsym, days)
+    if bars:
+        return bars
+    # 主源失败/空 → 回老域名再试一次(两者参数与结构一致)。
+    return _tencent_kline_request(_TENCENT_LEGACY_URL, "web.ifzq.gtimg.cn", tsym, days)
 
 
 # 腾讯美股日K必须带交易所后缀(usTSLA.OQ=纳斯达克 / usBABA.N=纽交所);裸 us{CODE}
