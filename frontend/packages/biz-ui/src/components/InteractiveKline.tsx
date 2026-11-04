@@ -34,6 +34,9 @@ type HoverTipRow = {
   ma5: number | null
   ma10: number | null
   ma20: number | null
+  bollUpper: number | null
+  bollMid: number | null
+  bollLower: number | null
   macd: number | null
   signal: number | null
   rsi6: number | null
@@ -109,6 +112,34 @@ function computeMacd(closes: number[]) {
   return { macd, signal, hist }
 }
 
+function computeBoll(closes: number[], period = 20, numStd = 2) {
+  const mid: Array<number | null> = new Array(closes.length).fill(null)
+  const upper: Array<number | null> = new Array(closes.length).fill(null)
+  const lower: Array<number | null> = new Array(closes.length).fill(null)
+  let sum = 0
+  let sumSq = 0
+  for (let i = 0; i < closes.length; i++) {
+    const v = closes[i]
+    sum += v
+    sumSq += v * v
+    if (i >= period) {
+      const old = closes[i - period]
+      sum -= old
+      sumSq -= old * old
+    }
+    if (i >= period - 1) {
+      const mean = sum / period
+      // Population standard deviation (divide by period), matching the backend BOLL.
+      const variance = Math.max(0, sumSq / period - mean * mean)
+      const std = Math.sqrt(variance)
+      mid[i] = mean
+      upper[i] = mean + numStd * std
+      lower[i] = mean - numStd * std
+    }
+  }
+  return { mid, upper, lower }
+}
+
 function computeRsi(closes: number[], period = 6): Array<number | null> {
   const out: Array<number | null> = new Array(closes.length).fill(null)
   if (closes.length <= period) return out
@@ -173,6 +204,7 @@ export default function InteractiveKline(props: {
   const [error, setError] = useState<string>('')
   const [data, setData] = useState<KlineItem[]>([])
   const [showRsi, setShowRsi] = useState(true)
+  const [showBoll, setShowBoll] = useState(true)
   const [hoverTip, setHoverTip] = useState<HoverTip>({ visible: false, x: 0, y: 0, row: null })
 
   const fixedDays = useMemo(() => {
@@ -273,7 +305,8 @@ export default function InteractiveKline(props: {
     const volMa10 = sma(volRaw, 10)
     const macd = computeMacd(closes)
     const rsi6 = computeRsi(closes, 6)
-    return { klines, candles, volumes, ma5, ma10, ma20, volMa5, volMa10, macd, rsi6 }
+    const boll = computeBoll(closes, 20, 2)
+    return { klines, candles, volumes, ma5, ma10, ma20, volMa5, volMa10, macd, rsi6, boll }
   }, [data, palette])
 
   const latestMetrics = useMemo(() => {
@@ -363,6 +396,11 @@ export default function InteractiveKline(props: {
     const ma10Series = addLine(chart, LW, { color: 'rgba(245, 158, 11, 0.85)', lineWidth: 2 })
     const ma20Series = addLine(chart, LW, { color: 'rgba(14, 165, 233, 0.85)', lineWidth: 2 })
 
+    // BOLL (20, 2): thin purple bands so they do not compete with the MA lines.
+    const bollUpperSeries = showBoll ? addLine(chart, LW, { color: 'rgba(217, 70, 239, 0.8)', lineWidth: 1, lineStyle: 2 }) : null
+    const bollMidSeries = showBoll ? addLine(chart, LW, { color: 'rgba(217, 70, 239, 0.5)', lineWidth: 1, lineStyle: 0 }) : null
+    const bollLowerSeries = showBoll ? addLine(chart, LW, { color: 'rgba(217, 70, 239, 0.8)', lineWidth: 1, lineStyle: 2 }) : null
+
     const mapLine = (arr: Array<number | null>) =>
       series.klines
         .map((k, i) => {
@@ -374,6 +412,9 @@ export default function InteractiveKline(props: {
     ma5Series.setData(mapLine(series.ma5) as any)
     ma10Series.setData(mapLine(series.ma10) as any)
     ma20Series.setData(mapLine(series.ma20) as any)
+    bollUpperSeries?.setData(mapLine(series.boll.upper) as any)
+    bollMidSeries?.setData(mapLine(series.boll.mid) as any)
+    bollLowerSeries?.setData(mapLine(series.boll.lower) as any)
     volMa5Series.setData(mapLine(series.volMa5) as any)
     volMa10Series.setData(mapLine(series.volMa10) as any)
 
@@ -495,7 +536,7 @@ export default function InteractiveKline(props: {
 
       const k = series.klines[idx]
       const tooltipWidth = 280
-      const tooltipHeight = 152
+      const tooltipHeight = showBoll ? 186 : 152
       let x = point.x + 12
       let y = point.y + 12
       if (x + tooltipWidth > container.clientWidth - 6) x = point.x - tooltipWidth - 12
@@ -516,6 +557,9 @@ export default function InteractiveKline(props: {
           ma5: series.ma5[idx],
           ma10: series.ma10[idx],
           ma20: series.ma20[idx],
+          bollUpper: series.boll.upper[idx],
+          bollMid: series.boll.mid[idx],
+          bollLower: series.boll.lower[idx],
           macd: series.macd.macd[idx],
           signal: series.macd.signal[idx],
           rsi6: series.rsi6[idx],
@@ -553,13 +597,16 @@ export default function InteractiveKline(props: {
         // ignore
       }
     }
-  }, [series, lwReady, showRsi, indexByDate, interval, palette])
+  }, [series, lwReady, showRsi, showBoll, indexByDate, interval, palette])
 
   return (
     <div className="card p-4 md:p-5">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-2 mb-3">
         <div className="text-[13px] font-semibold text-foreground">{tr('title')}</div>
         <div className="flex items-center gap-2 flex-wrap">
+          <Button variant={showBoll ? 'default' : 'secondary'} size="sm" className="h-8 px-2.5" onClick={() => setShowBoll(v => !v)}>
+            {tr('boll')}
+          </Button>
           <Button variant={showRsi ? 'default' : 'secondary'} size="sm" className="h-8 px-2.5" onClick={() => setShowRsi(v => !v)}>
             {tr('rsi')}
           </Button>
@@ -642,6 +689,13 @@ export default function InteractiveKline(props: {
               <span>{tr('hover.ma5')} <span className="font-mono text-foreground">{hoverTip.row.ma5 != null ? hoverTip.row.ma5.toFixed(2) : '--'}</span></span>
               <span>{tr('hover.ma10')} <span className="font-mono text-foreground">{hoverTip.row.ma10 != null ? hoverTip.row.ma10.toFixed(2) : '--'}</span></span>
               <span>{tr('hover.ma20')} <span className="font-mono text-foreground">{hoverTip.row.ma20 != null ? hoverTip.row.ma20.toFixed(2) : '--'}</span></span>
+              {showBoll ? (
+                <>
+                  <span>{tr('hover.bollUpper')} <span className="font-mono text-foreground">{hoverTip.row.bollUpper != null ? hoverTip.row.bollUpper.toFixed(2) : '--'}</span></span>
+                  <span>{tr('hover.bollMid')} <span className="font-mono text-foreground">{hoverTip.row.bollMid != null ? hoverTip.row.bollMid.toFixed(2) : '--'}</span></span>
+                  <span>{tr('hover.bollLower')} <span className="font-mono text-foreground">{hoverTip.row.bollLower != null ? hoverTip.row.bollLower.toFixed(2) : '--'}</span></span>
+                </>
+              ) : null}
               <span>{tr('hover.macd')} <span className="font-mono text-foreground">{hoverTip.row.macd != null ? hoverTip.row.macd.toFixed(3) : '--'}</span></span>
               <span>{tr('hover.signal')} <span className="font-mono text-foreground">{hoverTip.row.signal != null ? hoverTip.row.signal.toFixed(3) : '--'}</span></span>
               <span>{tr('hover.rsi')} <span className="font-mono text-foreground">{hoverTip.row.rsi6 != null ? hoverTip.row.rsi6.toFixed(1) : '--'}</span></span>
