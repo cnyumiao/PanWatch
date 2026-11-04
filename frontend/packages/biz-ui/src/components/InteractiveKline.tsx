@@ -5,6 +5,7 @@ import { Button } from '@panwatch/base-ui/components/ui/button'
 import { useTranslation } from 'react-i18next'
 import { useMarketColors } from '@/hooks/use-market-colors'
 import { marketColorWithAlpha, marketSignTextClass } from '@/lib/market-colors'
+import { BOLL_COLORS, computeBoll, computeMacd, computeRsi, sma } from '../kline-math'
 
 type BusinessDay = { year: number; month: number; day: number }
 
@@ -64,106 +65,6 @@ function parseCrosshairDateKey(time: any): string | null {
   return `${year.toString().padStart(4, '0')}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`
 }
 
-function sma(values: number[], period: number): Array<number | null> {
-  if (period <= 1) return values.map(v => v)
-  const out: Array<number | null> = new Array(values.length).fill(null)
-  let sum = 0
-  for (let i = 0; i < values.length; i++) {
-    sum += values[i]
-    if (i >= period) sum -= values[i - period]
-    if (i >= period - 1) out[i] = sum / period
-  }
-  return out
-}
-
-function ema(values: number[], period: number): Array<number | null> {
-  const out: Array<number | null> = new Array(values.length).fill(null)
-  if (values.length === 0) return out
-  const k = 2 / (period + 1)
-  let prev: number | null = null
-  for (let i = 0; i < values.length; i++) {
-    const v = values[i]
-    if (prev == null) {
-      prev = v
-      out[i] = v
-      continue
-    }
-    prev = v * k + prev * (1 - k)
-    out[i] = prev
-  }
-  return out
-}
-
-function computeMacd(closes: number[]) {
-  const e12 = ema(closes, 12)
-  const e26 = ema(closes, 26)
-  const macd: Array<number | null> = closes.map((_, i) => {
-    const a = e12[i]
-    const b = e26[i]
-    if (a == null || b == null) return null
-    return a - b
-  })
-  const macdVals = macd.map(v => (v == null ? 0 : v))
-  const signal = ema(macdVals, 9)
-  const hist: Array<number | null> = macd.map((v, i) => {
-    if (v == null || signal[i] == null) return null
-    return v - (signal[i] as number)
-  })
-  return { macd, signal, hist }
-}
-
-function computeBoll(closes: number[], period = 20, numStd = 2) {
-  const mid: Array<number | null> = new Array(closes.length).fill(null)
-  const upper: Array<number | null> = new Array(closes.length).fill(null)
-  const lower: Array<number | null> = new Array(closes.length).fill(null)
-  let sum = 0
-  let sumSq = 0
-  for (let i = 0; i < closes.length; i++) {
-    const v = closes[i]
-    sum += v
-    sumSq += v * v
-    if (i >= period) {
-      const old = closes[i - period]
-      sum -= old
-      sumSq -= old * old
-    }
-    if (i >= period - 1) {
-      const mean = sum / period
-      // Population standard deviation (divide by period), matching the backend BOLL.
-      const variance = Math.max(0, sumSq / period - mean * mean)
-      const std = Math.sqrt(variance)
-      mid[i] = mean
-      upper[i] = mean + numStd * std
-      lower[i] = mean - numStd * std
-    }
-  }
-  return { mid, upper, lower }
-}
-
-function computeRsi(closes: number[], period = 6): Array<number | null> {
-  const out: Array<number | null> = new Array(closes.length).fill(null)
-  if (closes.length <= period) return out
-  let gain = 0
-  let loss = 0
-  for (let i = 1; i <= period; i++) {
-    const diff = closes[i] - closes[i - 1]
-    if (diff >= 0) gain += diff
-    else loss += -diff
-  }
-  let avgGain = gain / period
-  let avgLoss = loss / period
-  out[period] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss)
-  for (let i = period + 1; i < closes.length; i++) {
-    const diff = closes[i] - closes[i - 1]
-    const g = diff > 0 ? diff : 0
-    const l = diff < 0 ? -diff : 0
-    avgGain = (avgGain * (period - 1) + g) / period
-    avgLoss = (avgLoss * (period - 1) + l) / period
-    out[i] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss)
-  }
-  return out
-}
-
 function getLW() {
   return (window as any)?.LightweightCharts || null
 }
@@ -205,6 +106,8 @@ export default function InteractiveKline(props: {
   const [data, setData] = useState<KlineItem[]>([])
   const [showRsi, setShowRsi] = useState(true)
   const [showBoll, setShowBoll] = useState(true)
+  // Moving averages are opt-in: BOLL is the default overlay.
+  const [showMa, setShowMa] = useState(false)
   const [hoverTip, setHoverTip] = useState<HoverTip>({ visible: false, x: 0, y: 0, row: null })
 
   const fixedDays = useMemo(() => {
@@ -389,18 +292,6 @@ export default function InteractiveKline(props: {
     })
     volSeries.setData(series.volumes)
     chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } })
-    const volMa5Series = addLine(chart, LW, { priceScaleId: 'vol', color: 'rgba(245, 158, 11, 0.9)', lineWidth: 1 })
-    const volMa10Series = addLine(chart, LW, { priceScaleId: 'vol', color: 'rgba(14, 165, 233, 0.9)', lineWidth: 1 })
-
-    const ma5Series = addLine(chart, LW, { color: 'rgba(99, 102, 241, 0.85)', lineWidth: 2 })
-    const ma10Series = addLine(chart, LW, { color: 'rgba(245, 158, 11, 0.85)', lineWidth: 2 })
-    const ma20Series = addLine(chart, LW, { color: 'rgba(14, 165, 233, 0.85)', lineWidth: 2 })
-
-    // BOLL (20, 2): thin purple bands so they do not compete with the MA lines.
-    const bollUpperSeries = showBoll ? addLine(chart, LW, { color: 'rgba(217, 70, 239, 0.8)', lineWidth: 1, lineStyle: 2 }) : null
-    const bollMidSeries = showBoll ? addLine(chart, LW, { color: 'rgba(217, 70, 239, 0.5)', lineWidth: 1, lineStyle: 0 }) : null
-    const bollLowerSeries = showBoll ? addLine(chart, LW, { color: 'rgba(217, 70, 239, 0.8)', lineWidth: 1, lineStyle: 2 }) : null
-
     const mapLine = (arr: Array<number | null>) =>
       series.klines
         .map((k, i) => {
@@ -409,14 +300,27 @@ export default function InteractiveKline(props: {
         })
         .filter(Boolean)
 
-    ma5Series.setData(mapLine(series.ma5) as any)
-    ma10Series.setData(mapLine(series.ma10) as any)
-    ma20Series.setData(mapLine(series.ma20) as any)
+    // Moving averages are opt-in so the BOLL bands stay readable by default.
+    if (showMa) {
+      const volMa5Series = addLine(chart, LW, { priceScaleId: 'vol', color: 'rgba(245, 158, 11, 0.9)', lineWidth: 1 })
+      const volMa10Series = addLine(chart, LW, { priceScaleId: 'vol', color: 'rgba(14, 165, 233, 0.9)', lineWidth: 1 })
+      const ma5Series = addLine(chart, LW, { color: 'rgba(99, 102, 241, 0.85)', lineWidth: 2 })
+      const ma10Series = addLine(chart, LW, { color: 'rgba(245, 158, 11, 0.85)', lineWidth: 2 })
+      const ma20Series = addLine(chart, LW, { color: 'rgba(14, 165, 233, 0.85)', lineWidth: 2 })
+      ma5Series.setData(mapLine(series.ma5) as any)
+      ma10Series.setData(mapLine(series.ma10) as any)
+      ma20Series.setData(mapLine(series.ma20) as any)
+      volMa5Series.setData(mapLine(series.volMa5) as any)
+      volMa10Series.setData(mapLine(series.volMa10) as any)
+    }
+
+    // BOLL (20, 2): all three bands are solid lines.
+    const bollUpperSeries = showBoll ? addLine(chart, LW, { color: BOLL_COLORS.upper, lineWidth: 1, lineStyle: 0 }) : null
+    const bollMidSeries = showBoll ? addLine(chart, LW, { color: BOLL_COLORS.mid, lineWidth: 1, lineStyle: 0 }) : null
+    const bollLowerSeries = showBoll ? addLine(chart, LW, { color: BOLL_COLORS.lower, lineWidth: 1, lineStyle: 0 }) : null
     bollUpperSeries?.setData(mapLine(series.boll.upper) as any)
     bollMidSeries?.setData(mapLine(series.boll.mid) as any)
     bollLowerSeries?.setData(mapLine(series.boll.lower) as any)
-    volMa5Series.setData(mapLine(series.volMa5) as any)
-    volMa10Series.setData(mapLine(series.volMa10) as any)
 
     // MACD chart
     let macdChart: any = null
@@ -536,7 +440,9 @@ export default function InteractiveKline(props: {
 
       const k = series.klines[idx]
       const tooltipWidth = 280
-      const tooltipHeight = showBoll ? 186 : 152
+      // Header + padding (67px) plus a 17px row per pair of grid cells.
+      const tooltipCells = 4 + (showMa ? 3 : 0) + (showBoll ? 3 : 0) + 3
+      const tooltipHeight = 67 + 17 * Math.ceil(tooltipCells / 2)
       let x = point.x + 12
       let y = point.y + 12
       if (x + tooltipWidth > container.clientWidth - 6) x = point.x - tooltipWidth - 12
@@ -597,7 +503,7 @@ export default function InteractiveKline(props: {
         // ignore
       }
     }
-  }, [series, lwReady, showRsi, showBoll, indexByDate, interval, palette])
+  }, [series, lwReady, showRsi, showBoll, showMa, indexByDate, interval, palette])
 
   return (
     <div className="card p-4 md:p-5">
@@ -606,6 +512,9 @@ export default function InteractiveKline(props: {
         <div className="flex items-center gap-2 flex-wrap">
           <Button variant={showBoll ? 'default' : 'secondary'} size="sm" className="h-8 px-2.5" onClick={() => setShowBoll(v => !v)}>
             {tr('boll')}
+          </Button>
+          <Button variant={showMa ? 'default' : 'secondary'} size="sm" className="h-8 px-2.5" onClick={() => setShowMa(v => !v)}>
+            {tr('ma')}
           </Button>
           <Button variant={showRsi ? 'default' : 'secondary'} size="sm" className="h-8 px-2.5" onClick={() => setShowRsi(v => !v)}>
             {tr('rsi')}
@@ -686,9 +595,13 @@ export default function InteractiveKline(props: {
               <span>{tr('hover.close')} <span className="font-mono text-foreground">{hoverTip.row.close.toFixed(2)}</span></span>
               <span>{tr('hover.high')} <span className="font-mono text-foreground">{hoverTip.row.high.toFixed(2)}</span></span>
               <span>{tr('hover.low')} <span className="font-mono text-foreground">{hoverTip.row.low.toFixed(2)}</span></span>
-              <span>{tr('hover.ma5')} <span className="font-mono text-foreground">{hoverTip.row.ma5 != null ? hoverTip.row.ma5.toFixed(2) : '--'}</span></span>
-              <span>{tr('hover.ma10')} <span className="font-mono text-foreground">{hoverTip.row.ma10 != null ? hoverTip.row.ma10.toFixed(2) : '--'}</span></span>
-              <span>{tr('hover.ma20')} <span className="font-mono text-foreground">{hoverTip.row.ma20 != null ? hoverTip.row.ma20.toFixed(2) : '--'}</span></span>
+              {showMa ? (
+                <>
+                  <span>{tr('hover.ma5')} <span className="font-mono text-foreground">{hoverTip.row.ma5 != null ? hoverTip.row.ma5.toFixed(2) : '--'}</span></span>
+                  <span>{tr('hover.ma10')} <span className="font-mono text-foreground">{hoverTip.row.ma10 != null ? hoverTip.row.ma10.toFixed(2) : '--'}</span></span>
+                  <span>{tr('hover.ma20')} <span className="font-mono text-foreground">{hoverTip.row.ma20 != null ? hoverTip.row.ma20.toFixed(2) : '--'}</span></span>
+                </>
+              ) : null}
               {showBoll ? (
                 <>
                   <span>{tr('hover.bollUpper')} <span className="font-mono text-foreground">{hoverTip.row.bollUpper != null ? hoverTip.row.bollUpper.toFixed(2) : '--'}</span></span>

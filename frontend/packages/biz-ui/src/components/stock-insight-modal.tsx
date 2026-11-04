@@ -27,6 +27,7 @@ import { useTranslation } from 'react-i18next'
 import { resolveSuggestionAction as normalizeSuggestionAction, suggestionPresentation, type SuggestionStateInput } from './suggestion-action'
 import { useMarketColors } from '@/hooks/use-market-colors'
 import { marketSignTextClass } from '@/lib/market-colors'
+import { BOLL_COLORS, computeBoll } from '../kline-math'
 
 interface QuoteResponse {
   symbol: string
@@ -428,7 +429,8 @@ export default function StockInsightModal(props: {
         days: 36,
         interval: '1d',
       })
-      setMiniKlines((data?.klines || []).slice(-30))
+      // Keep the full window so the 20-period BOLL has history; the chart draws the tail.
+      setMiniKlines(data?.klines || [])
     } catch {
       setMiniKlines([])
     } finally {
@@ -1247,16 +1249,42 @@ export default function StockInsightModal(props: {
     return () => clearTimeout(timer)
   }, [props.open, symbol, market, triggerAutoAiSuggestion])
 
-  const miniKlineExtrema = useMemo(() => {
+  // Mini chart: draw the latest 30 bars, but compute BOLL over the whole fetched
+  // window so the bands are warm for the visible range. Bands are included in the
+  // y-extrema so they never get clipped.
+  const miniKlineChart = useMemo(() => {
     if (!miniKlines.length) return null
+    const closes = miniKlines.map(k => Number(k.close))
+    const boll = computeBoll(closes, 20, 2)
+    const start = Math.max(0, miniKlines.length - 30)
+    const bars = miniKlines.slice(start)
+    const bands = {
+      upper: boll.upper.slice(start),
+      mid: boll.mid.slice(start),
+      lower: boll.lower.slice(start),
+    }
     let low = Number.POSITIVE_INFINITY
     let high = Number.NEGATIVE_INFINITY
-    for (const k of miniKlines) {
+    for (const k of bars) {
       low = Math.min(low, Number(k.low))
       high = Math.max(high, Number(k.high))
     }
+    for (const arr of [bands.upper, bands.mid, bands.lower]) {
+      for (const v of arr) {
+        if (v == null) continue
+        low = Math.min(low, v)
+        high = Math.max(high, v)
+      }
+    }
     if (!isFinite(low) || !isFinite(high) || high <= low) return null
-    return { low, high }
+    const lastBand = (arr: Array<number | null>) => arr.length ? arr[arr.length - 1] : null
+    return {
+      bars,
+      bands,
+      low,
+      high,
+      latest: { upper: lastBand(bands.upper), mid: lastBand(bands.mid), lower: lastBand(bands.lower) },
+    }
   }, [miniKlines])
 
   return (
@@ -1479,45 +1507,77 @@ export default function StockInsightModal(props: {
                     <div className="text-[12px] text-muted-foreground mb-2">{tr('miniKline.title')}</div>
                     {miniKlineLoading ? (
                       <div className="h-32 rounded bg-accent/30 animate-pulse" />
-                    ) : miniKlines.length > 0 && miniKlineExtrema ? (
-                      <svg
-                        viewBox="0 0 320 120"
-                        className="w-full h-32 cursor-pointer"
-                        onClick={() => setTab('kline')}
-                        onMouseLeave={() => setMiniHoverIdx(null)}
-                        onMouseMove={(e) => {
-                          const rect = e.currentTarget.getBoundingClientRect()
-                          const x = e.clientX - rect.left
-                          const ratio = rect.width > 0 ? x / rect.width : 0
-                          const idx = Math.floor(ratio * miniKlines.length)
-                          setMiniHoverIdx(Math.max(0, Math.min(miniKlines.length - 1, idx)))
-                        }}
-                      >
-                        <title>{tr('miniKline.open')}</title>
-                        {miniKlines.map((k, idx) => {
-                          const xStep = 320 / miniKlines.length
-                          const x = xStep * idx + xStep / 2
-                          const bodyW = Math.max(2, xStep * 0.5)
-                          const toY = (v: number) => 114 - ((v - miniKlineExtrema.low) / (miniKlineExtrema.high - miniKlineExtrema.low)) * 100
-                          const yOpen = toY(Number(k.open))
-                          const yClose = toY(Number(k.close))
-                          const yHigh = toY(Number(k.high))
-                          const yLow = toY(Number(k.low))
-                          const close = Number(k.close)
-                          const open = Number(k.open)
-                          const color = close > open ? palette.up.bright : close < open ? palette.down.bright : palette.flat
-                          const bodyTop = Math.min(yOpen, yClose)
-                          const bodyH = Math.max(1.4, Math.abs(yOpen - yClose))
-                          const active = miniHoverIdx === idx
-                          return (
-                            <g key={`${k.date}-${idx}`}>
-                              {active && <rect x={x - xStep / 2} y={6} width={xStep} height={108} fill="rgba(59,130,246,0.10)" />}
-                              <line x1={x} y1={yHigh} x2={x} y2={yLow} stroke={color} strokeWidth="1" />
-                              <rect x={x - bodyW / 2} y={bodyTop} width={bodyW} height={bodyH} fill={color} rx="0.6" />
-                            </g>
-                          )
-                        })}
-                      </svg>
+                    ) : miniKlineChart ? (
+                      <>
+                        <svg
+                          viewBox="0 0 320 120"
+                          className="w-full h-32 cursor-pointer"
+                          onClick={() => setTab('kline')}
+                          onMouseLeave={() => setMiniHoverIdx(null)}
+                          onMouseMove={(e) => {
+                            const rect = e.currentTarget.getBoundingClientRect()
+                            const x = e.clientX - rect.left
+                            const ratio = rect.width > 0 ? x / rect.width : 0
+                            const idx = Math.floor(ratio * miniKlineChart.bars.length)
+                            setMiniHoverIdx(Math.max(0, Math.min(miniKlineChart.bars.length - 1, idx)))
+                          }}
+                        >
+                          <title>{tr('miniKline.open')}</title>
+                          {(() => {
+                            const { bars, bands, low, high } = miniKlineChart
+                            const xStep = 320 / bars.length
+                            const toY = (v: number) => 114 - ((v - low) / (high - low)) * 100
+                            const bandPoints = (arr: Array<number | null>) =>
+                              arr
+                                .map((v, idx) => (v == null ? null : `${xStep * idx + xStep / 2},${toY(v)}`))
+                                .filter(Boolean)
+                                .join(' ')
+                            return (
+                              <>
+                                <polyline points={bandPoints(bands.upper)} fill="none" stroke={BOLL_COLORS.upper} strokeWidth="1" />
+                                <polyline points={bandPoints(bands.mid)} fill="none" stroke={BOLL_COLORS.mid} strokeWidth="1" />
+                                <polyline points={bandPoints(bands.lower)} fill="none" stroke={BOLL_COLORS.lower} strokeWidth="1" />
+                                {bars.map((k, idx) => {
+                                  const x = xStep * idx + xStep / 2
+                                  const bodyW = Math.max(2, xStep * 0.5)
+                                  const yOpen = toY(Number(k.open))
+                                  const yClose = toY(Number(k.close))
+                                  const yHigh = toY(Number(k.high))
+                                  const yLow = toY(Number(k.low))
+                                  const close = Number(k.close)
+                                  const open = Number(k.open)
+                                  const color = close > open ? palette.up.bright : close < open ? palette.down.bright : palette.flat
+                                  const bodyTop = Math.min(yOpen, yClose)
+                                  const bodyH = Math.max(1.4, Math.abs(yOpen - yClose))
+                                  const active = miniHoverIdx === idx
+                                  return (
+                                    <g key={`${k.date}-${idx}`}>
+                                      {active && <rect x={x - xStep / 2} y={6} width={xStep} height={108} fill="rgba(59,130,246,0.10)" />}
+                                      <line x1={x} y1={yHigh} x2={x} y2={yLow} stroke={color} strokeWidth="1" />
+                                      <rect x={x - bodyW / 2} y={bodyTop} width={bodyW} height={bodyH} fill={color} rx="0.6" />
+                                    </g>
+                                  )
+                                })}
+                              </>
+                            )
+                          })()}
+                        </svg>
+                        <div data-testid="mini-kline-boll-legend" className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+                          <span className="font-medium text-foreground/80">{tr('miniKline.boll')}</span>
+                          <span className="inline-flex items-center gap-1">
+                            <span className="inline-block h-0.5 w-3 rounded-full" style={{ background: BOLL_COLORS.upper }} />
+                            {tr('miniKline.bollUpper')} <span className="font-mono text-foreground">{formatNumber(miniKlineChart.latest.upper)}</span>
+                          </span>
+                          <span className="inline-flex items-center gap-1">
+                            <span className="inline-block h-0.5 w-3 rounded-full" style={{ background: BOLL_COLORS.mid }} />
+                            {tr('miniKline.bollMid')} <span className="font-mono text-foreground">{formatNumber(miniKlineChart.latest.mid)}</span>
+                          </span>
+                          <span className="inline-flex items-center gap-1">
+                            <span className="inline-block h-0.5 w-3 rounded-full" style={{ background: BOLL_COLORS.lower }} />
+                            {tr('miniKline.bollLower')} <span className="font-mono text-foreground">{formatNumber(miniKlineChart.latest.lower)}</span>
+                          </span>
+                        </div>
+                      </>
                     ) : (
                       <div className="h-32 text-[11px] text-muted-foreground flex items-center justify-center">{tr('miniKline.empty')}</div>
                     )}

@@ -57,6 +57,15 @@ function createChartStub() {
 const bollSeries = (record: ChartRecord) =>
   record.series.filter(series => series.kind === 'line' && String(series.options.color).includes('217, 70, 239'))
 
+// The moving averages (price + volume) are the only line series on the main
+// chart besides BOLL; MACD lives on its own chart.
+const maSeries = (record: ChartRecord) =>
+  record.series.filter(series => series.kind === 'line' && !String(series.options.color).includes('217, 70, 239'))
+
+// Each re-render creates the main chart first and the MACD/RSI charts after it,
+// so pick the newest chart that actually holds the candles.
+const latestMainChart = () => [...charts].reverse().find(record => record.series.some(series => series.kind === 'candle'))
+
 beforeEach(() => {
   charts.length = 0
   vi.stubGlobal('LightweightCharts', { createChart: createChartStub })
@@ -97,13 +106,35 @@ it('plots BOLL upper/middle/lower bands on the candlestick chart', async () => {
   expect(last(lower)).toBeLessThan(last(mid))
 })
 
+it('draws all three BOLL bands as solid lines', async () => {
+  renderChart()
+  await waitFor(() => expect(charts.length).toBeGreaterThan(0))
+
+  const mainChart = latestMainChart()
+  expect(mainChart).toBeTruthy()
+  const bands = bollSeries(mainChart as ChartRecord)
+  expect(bands).toHaveLength(3)
+  for (const band of bands) {
+    // 0 = LineStyle.Solid in lightweight-charts; dashed (2) was the old default.
+    expect(band.options.lineStyle).toBe(0)
+  }
+})
+
+it('hides moving averages by default and plots them after the MA toggle', async () => {
+  renderChart()
+  await waitFor(() => expect(charts.length).toBeGreaterThan(0))
+
+  expect(maSeries(latestMainChart() as ChartRecord)).toHaveLength(0)
+
+  fireEvent.click(screen.getByRole('button', { name: '均线' }))
+  await waitFor(() => expect(maSeries(latestMainChart() as ChartRecord)).toHaveLength(5))
+})
+
 it('removes the bands when the BOLL toggle is switched off', async () => {
   renderChart()
   await waitFor(() => expect(charts.length).toBeGreaterThan(0))
-  expect(bollSeries(charts[0])).toHaveLength(3)
+  expect(bollSeries(latestMainChart() as ChartRecord)).toHaveLength(3)
 
   fireEvent.click(screen.getByRole('button', { name: '布林线' }))
-  await waitFor(() => expect(charts.length).toBeGreaterThan(1))
-
-  expect(bollSeries(charts[charts.length - 1])).toHaveLength(0)
+  await waitFor(() => expect(bollSeries(latestMainChart() as ChartRecord)).toHaveLength(0))
 })
