@@ -31,13 +31,35 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/*
 
+# 这条网络对 HTTP/2 很不稳：clone TradingAgents 经常断在
+# "RPC failed; curl 16 Error in the HTTP2 framing layer"。
+# 对 GitHub 退回 HTTP/1.1，并放宽 pip 的超时/重试，避免整次构建因瞬时断流失败。
+RUN git config --system http.version HTTP/1.1
+ENV PIP_DEFAULT_TIMEOUT=60 \
+    PIP_RETRIES=10
+
 COPY requirements-runtime.txt ./
+
+# 第三方依赖单独一层：本层只依赖 requirements-runtime.txt，改 `packages/` 下的本地源码
+# 不会让这层失效，也就不会重新 clone TradingAgents、重新下载 langchain 等重依赖。
+# pip 的 wheel 缓存挂到 BuildKit cache 上：确实需要重装时（改 requirements 或首次构建），
+# 已下载的 wheel 直接复用；脚本自动重试时也不用从零开始。
+RUN --mount=type=cache,target=/root/.cache/pip \
+    grep -vE '^[[:space:]]*(-e|--editable)([[:space:]]|$)' requirements-runtime.txt \
+        > /tmp/requirements-thirdparty.txt \
+    && pip install --no-compile --prefix=/install -r /tmp/requirements-thirdparty.txt
+
+# 本仓 packages 是纯 Python、体量小，放在最后安装：改源码只重装这几个本地包。
 COPY packages/ ./packages/
 
 # 本地开发保留 editable 安装；镜像内安装正常包，不依赖源码目录。
 # 不预编译字节码，避免把 .pyc 缓存打进镜像。
-RUN sed 's/^-e //' requirements-runtime.txt > /tmp/requirements-runtime.txt \
-    && pip install --no-cache-dir --no-compile --prefix=/install -r /tmp/requirements-runtime.txt
+# PYTHONPATH 让 resolver 看到上一层已装的依赖，避免重复安装和跨层版本冲突。
+RUN --mount=type=cache,target=/root/.cache/pip \
+    sed -nE 's/^[[:space:]]*(-e|--editable)[[:space:]]+//p' requirements-runtime.txt \
+        > /tmp/requirements-local.txt \
+    && PYTHONPATH=/install/lib/python3.11/site-packages \
+       pip install --no-compile --prefix=/install -r /tmp/requirements-local.txt
 
 
 # ===== Stage 3: Python 运行环境 =====
